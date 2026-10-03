@@ -77,7 +77,7 @@ def test_dummy_expert_banks_follow_the_kernel_layout(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-@pytest.mark.parametrize("available_layers, gpu_layers", [(4, 0), (3, 1), (1, 3)])
+@pytest.mark.parametrize("available_layers, gpu_layers", [(4, ()), (3, (0,)), (1, (0, 1, 2)), ((4, 4, 1, 1), (1, 2))])
 def test_fp8_banks_fit_host_ram_without_changing_weight_bytes(monkeypatch, available_layers, gpu_layers):
     from freetoken.layers.quantization.moe.base import MoEConfig
     from freetoken.layers.quantization.moe.fp8_block import Fp8BlockMoEMethod
@@ -87,7 +87,11 @@ def test_fp8_banks_fit_host_ram_without_changing_weight_bytes(monkeypatch, avail
     method = Fp8BlockMoEMethod(MoEConfig(4, 256, 128, 2, strategy="offload"))
     specs = method.layout()
     layer_bytes = sum(4 * torch.empty(s.shape, dtype=s.dtype).nbytes for s in specs.values())
-    monkeypatch.setattr(expert_banks, "_host_available_bytes", lambda: available_layers * layer_bytes)
+    if isinstance(available_layers, tuple):
+        availability = iter(available_layers)
+        monkeypatch.setattr(expert_banks, "_host_available_bytes", lambda: next(availability) * layer_bytes)
+    else:
+        monkeypatch.setattr(expert_banks, "_host_available_bytes", lambda: available_layers * layer_bytes)
     pieces = []
     for layer in range(3):
         piece = {
@@ -105,7 +109,7 @@ def test_fp8_banks_fit_host_ram_without_changing_weight_bytes(monkeypatch, avail
         got = cache.wait_prefill_layer(layer)
         for (name, per_layer), copied in zip(cache.bank_sources.items(), got):
             source = per_layer[layer]
-            assert source.is_cuda == (layer < gpu_layers)
+            assert source.is_cuda == (layer in gpu_layers)
             reference = torch.zeros(source.shape, dtype=source.dtype)
             value = piece[name]
             reference[..., :value.shape[-1]].copy_(value)

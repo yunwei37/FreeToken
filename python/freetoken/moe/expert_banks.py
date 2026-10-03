@@ -93,18 +93,19 @@ def build_expert_banks(
     specs = {role: ((E, *spec.shape), spec.dtype) for role, spec in layout.items() if not spec.resident}
     hb = alloc_layer_banks(specs, num_layers)
     banks = {role: [b.tensor for b in hb[role]] for role in specs}
-    gpu_layers = 0
-    if layer_sink is None and not dummy and device.type == "cuda" and method.kind is QuantKind.FP8_BLOCK:
+    gpu_layers = set()
+    fit_host_ram = layer_sink is None and not dummy and device.type == "cuda" and method.kind is QuantKind.FP8_BLOCK
+    layer_bytes = sum(per_layer[0].nbytes for per_layer in hb.values())
+    if fit_host_ram:
         available = _host_available_bytes()
-        layer_bytes = sum(per_layer[0].nbytes for per_layer in hb.values())
         if available is not None and layer_bytes:
             # Keep one layer of host staging space while packing; CMA cannot back registered banks.
-            gpu_layers = min(num_layers, max(0, (layer_bytes * (num_layers + 1) - available + layer_bytes - 1) // layer_bytes))
+            gpu_layers = set(range(min(num_layers, max(0, (layer_bytes * (num_layers + 1) - available + layer_bytes - 1) // layer_bytes))))
         if gpu_layers:
             for role, per_layer in banks.items():
-                for layer_id in range(gpu_layers):
+                for layer_id in gpu_layers:
                     per_layer[layer_id] = torch.zeros_like(per_layer[layer_id], device=device)
-            logger.info(f"expert banks: keeping {gpu_layers} FP8 layers ({gpu_layers * layer_bytes / 2**30:.2f} GiB) on GPU to fit host RAM")
+            logger.info(f"expert banks: keeping {len(gpu_layers)} FP8 layers ({len(gpu_layers) * layer_bytes / 2**30:.2f} GiB) on GPU to fit host RAM")
     alphas = {
         role: torch.empty(num_layers * E, dtype=spec.dtype, device=device)
         for role, spec in layout.items() if spec.resident
@@ -134,6 +135,14 @@ def build_expert_banks(
             # refuse before writing: a duplicate row would also complete the layer early and hand the sink a half-filled bank
             if written[layer_id, e0:e1].any():
                 raise ValueError(f"expert rows written more than once: layer {layer_id}, experts {e0}:{e1}")
+            if fit_host_ram and layer_id not in gpu_layers and not written[layer_id].any():
+                # Reclaim and host registration change usable RAM during a long load.
+                available = _host_available_bytes()
+                if available is not None and available < 2 * layer_bytes:
+                    for per_layer in banks.values():
+                        per_layer[layer_id] = torch.zeros_like(per_layer[layer_id], device=device)
+                    gpu_layers.add(layer_id)
+                    logger.info(f"expert banks: keeping FP8 layer {layer_id} on GPU after host RAM changed")
             written[layer_id, e0:e1] = 1
             out = {role: banks[role][layer_id][e0:e1] for role in specs}
             got = method.pack(piece, out)
@@ -150,7 +159,7 @@ def build_expert_banks(
         _fill(layer_sink)
     elif torch.cuda.is_available():
         with PinPipeline() as pins:
-            _fill(lambda layer_id, layer_banks: pins(layer_id, layer_banks) if layer_id >= gpu_layers else None)
+            _fill(lambda layer_id, layer_banks: pins(layer_id, layer_banks) if layer_id not in gpu_layers else None)
     else:
         _fill(None)
 
