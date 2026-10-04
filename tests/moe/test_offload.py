@@ -125,6 +125,46 @@ def test_fp8_banks_fit_host_ram_without_changing_weight_bytes(monkeypatch, avail
             assert torch.equal(got, per_layer[layer].cpu()[[3, 1]].view(torch.uint8))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_fp8_gpu_source_decode_uses_original_expert_ids_without_cache_copy(monkeypatch):
+    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.layers.quantization.moe.base import MoEConfig
+    from freetoken.layers.quantization.moe.fp8_block import Fp8BlockMoEMethod
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    _init_tp()
+    experts, hidden, inter, topk = 4, 256, 128, 2
+    method = Fp8BlockMoEMethod(MoEConfig(experts, hidden, inter, topk, strategy="offload"))
+    cache = OffloadMoeCache(1, experts, 2 * experts, device=torch.device("cuda"),
+                            quant_format="fp8_block", layout=method.layout(), prefill_overlap=False)
+    sources = {}
+    for name, spec in method.layout().items():
+        value = 1.0 if "scale" in name else 0.25
+        tensor = torch.full((experts, *spec.shape), value, device="cuda", dtype=torch.float32).to(spec.dtype)
+        sources[name] = [tensor]
+    cache.set_bank_sources(sources)
+    layer = OffloadMoELayer(0, experts, topk, hidden, inter)
+    layer.quant_method = method
+    layer.offload_cache = cache
+    x = torch.ones((1, hidden), dtype=torch.bfloat16, device="cuda")
+    weights = torch.tensor([[0.6, 0.4]], dtype=torch.float32, device="cuda")
+    ids = torch.tensor([[1, 3]], dtype=torch.int32, device="cuda")
+
+    cached_ids = ids.clone()
+    cache.ensure_experts(0, cached_ids)
+    cache.copy_missing()
+    expected = layer._expert_gemm(cache, x, weights, cached_ids, views=cache.bank_views(),
+                                  n=None, alphas=cache.alphas_for_slots(0), is_prefill=False)
+    cache.reset()
+    monkeypatch.setattr(cache, "ensure_experts", lambda *_: pytest.fail("GPU source used the slot cache"))
+    monkeypatch.setattr(cache, "copy_missing", lambda: pytest.fail("GPU source copied experts"))
+
+    actual = layer._decode_routed(x, weights, ids)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(ids, torch.tensor([[1, 3]], dtype=torch.int32, device="cuda"))
+
+
 def test_host_available_bytes_excludes_cma(monkeypatch):
     from io import StringIO
     from freetoken.moe.expert_banks import _host_available_bytes
