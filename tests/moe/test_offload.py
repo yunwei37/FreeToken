@@ -126,6 +126,27 @@ def test_fp8_banks_fit_host_ram_without_changing_weight_bytes(monkeypatch, avail
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_fp8_resident_banks_bypass_host_fit(monkeypatch):
+    from freetoken.layers.quantization.moe.base import MoEConfig
+    from freetoken.layers.quantization.moe.fp8_block import Fp8BlockMoEMethod
+    from freetoken.moe import expert_banks
+
+    method = Fp8BlockMoEMethod(MoEConfig(4, 256, 128, 2, strategy="fused"))
+    monkeypatch.setattr(expert_banks, "_host_available_bytes", lambda: pytest.fail("resident banks checked host RAM"))
+    pieces = {
+        "gate_up": torch.ones((4, 256, 256), dtype=torch.float8_e4m3fn),
+        "down": torch.ones((4, 256, 128), dtype=torch.float8_e4m3fn),
+        "gate_up_scale": torch.ones((4, 2, 2), dtype=torch.bfloat16),
+        "down_scale": torch.ones((4, 2, 1), dtype=torch.bfloat16),
+    }
+    banks = expert_banks.build_expert_banks(
+        method, 1, iter([(0, 0, 4, pieces)]), device=torch.device("cuda"), resident=True,
+    )
+    assert all(t.is_cuda for per_layer in banks.sources.values() for t in per_layer)
+    assert torch.equal(banks.sources["down"][0].cpu(), pieces["down"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_fp8_gpu_source_decode_uses_original_expert_ids_without_cache_copy(monkeypatch):
     from freetoken.layers.moe import OffloadMoELayer
     from freetoken.layers.quantization.moe.base import MoEConfig
