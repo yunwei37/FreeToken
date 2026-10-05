@@ -179,11 +179,37 @@ def test_fp8_gpu_source_decode_uses_original_expert_ids_without_cache_copy(monke
     cache.reset()
     monkeypatch.setattr(cache, "ensure_experts", lambda *_: pytest.fail("GPU source used the slot cache"))
     monkeypatch.setattr(cache, "copy_missing", lambda: pytest.fail("GPU source copied experts"))
+    cache.collect_stats = True
+    cache.collect_decode_freq = True
 
     actual = layer._decode_routed(x, weights, ids)
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(ids, torch.tensor([[1, 3]], dtype=torch.int32, device="cuda"))
+    stats = cache.decode_miss_stats_per_layer()["per_layer"][0]
+    assert stats["steps"] == 1
+    assert stats["active_per_step"] == 2
+    assert stats["missing_per_step"] == 0
+    assert cache.decode_freq[0].tolist() == [0, 1, 0, 1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_gpu_source_decode_stats_follow_graph_replay_ids():
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    cache = OffloadMoeCache(1, 4, 8, device=torch.device("cuda"), quant_format="fp8_block")
+    cache.collect_stats = True
+    ids = torch.tensor([[0, 1], [1, 2]], dtype=torch.int32, device="cuda")
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        cache.record_gpu_source_decode(0, ids)
+    cache.reset_stats()
+    ids.copy_(torch.tensor([[2, 3], [3, 3]], dtype=torch.int32, device="cuda"))
+    graph.replay()
+    stats = cache.decode_miss_stats_per_layer()["per_layer"][0]
+    assert stats["steps"] == 1
+    assert stats["active_per_step"] == 2
+    assert stats["missing_per_step"] == 0
 
 
 def test_host_available_bytes_excludes_cma(monkeypatch):

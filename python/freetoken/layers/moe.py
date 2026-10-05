@@ -284,6 +284,8 @@ class OffloadMoELayer(MoELayer):
             return self._decode_hybrid(cache, hidden_states, topk_weights, topk_ids)
         if cache.quant_format == "fp8_block" and cache.bank_sources["gate_up"][self.layer_id].is_cuda:
             # GPU source banks do not need copies that occupy shared cache slots.
+            if cache.collect_stats or cache.collect_decode_freq:
+                cache.record_gpu_source_decode(self.layer_id, topk_ids)
             return self._expert_gemm(
                 cache, hidden_states, topk_weights, topk_ids,
                 views=tuple(cache.bank_sources[name][self.layer_id] for name in cache.bank_schema),

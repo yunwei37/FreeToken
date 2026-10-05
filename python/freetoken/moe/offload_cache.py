@@ -852,6 +852,17 @@ class OffloadMoeCache:
         self._pending_whole_layer = False
         ensure_experts(self, layer_id, expert_ids)
 
+    def record_gpu_source_decode(self, layer_id: int, expert_ids: torch.Tensor) -> None:
+        """Count routed work for GPU source layers that have no slot-cache misses."""
+        ids = expert_ids.reshape(-1).long()
+        if self.collect_stats:
+            self.active_mask.zero_()
+            self.active_mask.scatter_(0, ids, 1)
+            self.lru_stats[layer_id, Stat.ACTIVE] += self.active_mask.sum()
+            self.lru_stats[layer_id, Stat.CALLS] += 1
+        if self.collect_decode_freq:
+            self.decode_freq[layer_id].scatter_add_(0, ids, torch.ones_like(ids))
+
     def ensure_experts_hybrid(self, layer_id: int, expert_ids: torch.Tensor) -> None:
         """Capped-fetch LRU for the hybrid backend.
 
