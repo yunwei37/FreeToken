@@ -273,3 +273,13 @@ def test_fp8_block_kernel_selects_for_hybrid():
             decode_target=decode_target,
         )
         assert kernel.unusable_reason(cfg) is None, decode_target
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_fp8_block_bench_gather_uses_padded_qwen_scales():
+    from freetoken.moe.benchbw import Workload, measure_pcie_gather_bw
+
+    workload = Workload("qwen-fp8-shape", 2560, 640, 4, 4, ("fp8_block",))
+    result = measure_pcie_gather_bw("fp8_block", workload, torch.device("cuda"), iters=2)
+    assert result["fused"]
+    assert result["expert_bytes"] == 4_915_840
