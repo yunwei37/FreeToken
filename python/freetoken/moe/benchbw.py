@@ -288,9 +288,14 @@ def _offload_bank_specs(fmt: str, H: int, I: int) -> dict[str, tuple[int, torch.
     if fmt == "bf16":
         return {"gate_up": (2 * I * H, bf16), "down": (H * I, bf16)}
     if fmt == "fp8_block":
+        from freetoken.kernel.aot_models import fp8_block_scale_pad
+
+        gate_blocks, down_blocks = 2 * I // 128, H // 128
         return {
-            "gate_up": (2 * I * H, f8), "gate_up_scale": ((2 * I // 128) * (H // 128), bf16),
-            "down": (H * I, f8), "down_scale": ((H // 128) * (I // 128), bf16),
+            "gate_up": (2 * I * H, f8),
+            "gate_up_scale": (gate_blocks * fp8_block_scale_pad(gate_blocks, H // 128), bf16),
+            "down": (H * I, f8),
+            "down_scale": (down_blocks * fp8_block_scale_pad(down_blocks, I // 128), bf16),
         }
     if fmt == "nvfp4":
         return {
