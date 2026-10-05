@@ -67,18 +67,19 @@ def plan_cache_budget(
     assert cache_per_page > 0, "cache_per_page must be positive (owned-KV models unsupported here)"
 
     hi = min(total_experts, max_slots)
-    # Prefill overlap borrows two full expert-layer buffers, so it needs >= 2*num_experts
-    # slots; disable it (and lower the floor) if the cap cannot fit that.
-    overlap = prefill_overlap and hi >= 2 * num_experts
+    # Prefill overlap borrows two full expert-layer buffers; lower the floor when
+    # the slot cap or budget cannot hold both buffers alongside reserved KV.
+    kv_reserve_bytes = kv_reserve_pages * cache_per_page
+    overlap = (
+        prefill_overlap and hi >= 2 * num_experts
+        and budget_bytes >= 2 * num_experts * per_expert_bytes + kv_reserve_bytes
+    )
     lo = 2 * num_experts if overlap else num_experts
     assert hi >= lo, f"slot cap {hi} below the minimum {lo} slots"
 
-    kv_reserve_bytes = kv_reserve_pages * cache_per_page
     # MoE-priority: reserve KV first, then experts greedily take the remaining budget.
     raw = (budget_bytes - kv_reserve_bytes) // per_expert_bytes
     moe_cache_size = max(lo, min(raw, hi))
-    # A tiny budget may have forced moe_cache_size below 2*num_experts even with overlap on.
-    overlap = overlap and moe_cache_size >= 2 * num_experts
 
     remaining = budget_bytes - moe_cache_size * per_expert_bytes
     num_pages = max(remaining // cache_per_page, kv_reserve_pages)
