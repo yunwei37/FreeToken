@@ -46,6 +46,38 @@ def _t(xs: Sequence[int], dtype=torch.int64) -> torch.Tensor:
     return torch.tensor(list(xs), dtype=dtype)
 
 
+@pytest.mark.parametrize("kind", KINDS)
+def test_insert_releases_output_budget_token_storage(kind):
+    adapter, _ = CacheSpec(kind, 64, window=128 if kind == "swa" else 0).build()
+    cache = adapter.cache
+    request = torch.arange(262144, dtype=torch.int64)
+    expected = request[:320].clone()
+    slots = torch.arange(1000, 1327, dtype=torch.int32)
+
+    def insert(length, snapshot):
+        if kind == "plain":
+            cache.insert_prefix(request[:length], slots[:length])
+        elif kind == "hybrid":
+            cache.insert(request[:length], slots[:length], snapshot)
+        else:
+            cache.insert(request[:length], slots[:length],
+                         swa_evicted_seqlen=192 if length > 128 else 0)
+
+    insert(128, 1)
+    insert(327, 2)
+    # Count backing allocations, including any storage shared by split nodes.
+    storage = {n._key.untyped_storage().data_ptr(): n._key.untyped_storage().nbytes()
+               for n in adapter.nodes()}
+    assert sum(storage.values()) <= expected.nbytes
+    request.fill_(-1)
+    cache.match_prefix(expected[:256])
+    matched = adapter.match(expected.tolist())
+    assert matched.cached_len == 320
+    assert matched.indices == slots[:320].tolist()
+    if kind == "hybrid":
+        assert matched.second == 2
+
+
 # =============================================================================================
 # 1. SHARED TREE MACHINERY, tested once and class-free
 # =============================================================================================
